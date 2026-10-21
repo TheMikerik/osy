@@ -1,1 +1,5 @@
-/default
+/z_default
+
+**/*.o
+**/s
+**/c

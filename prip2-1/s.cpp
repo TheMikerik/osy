@@ -21,9 +21,12 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <sys/wait.h>
+#include <csignal>
 
 #define STR_CLOSE   "close"
 #define STR_QUIT    "quit"
+#define PY_EXAMPLES 3       // number of examples before python3 is started
 
 // ***************************************************************************
 // log messages
@@ -83,6 +86,97 @@ const char g_help[] =
     ;
 
 // ***************************************************************************
+
+// ***************************************************************************
+// child process: python3 calculator, its stdout goes directly to the socket
+
+void run_python( int t_sock, const char *t_script, int t_len )
+{
+    int l_pipe[ 2 ];
+    if ( pipe( l_pipe ) < 0 )
+    {
+        log_msg( LOG_ERROR, "Unable to create pipe." );
+        return;
+    }
+
+    pid_t l_pid = fork();
+    if ( l_pid < 0 )
+    {
+        log_msg( LOG_ERROR, "Unable to fork for python3." );
+        close( l_pipe[ 0 ] );
+        close( l_pipe[ 1 ] );
+        return;
+    }
+
+    if ( l_pid == 0 )
+    { // python3 process
+        close( l_pipe[ 1 ] );
+        dup2( l_pipe[ 0 ], STDIN_FILENO );
+        close( l_pipe[ 0 ] );
+        dup2( t_sock, STDOUT_FILENO );
+        close( t_sock );
+        execlp( "python3", "python3", NULL );
+        log_msg( LOG_ERROR, "Unable to run python3." );
+        exit( EXIT_FAILURE );
+    }
+
+    // client process: send examples to python3 and wait for it
+    close( l_pipe[ 0 ] );
+    if ( write( l_pipe[ 1 ], t_script, t_len ) < 0 )
+    {
+        log_msg( LOG_ERROR, "Unable to write to python3." );
+    }
+    close( l_pipe[ 1 ] );
+    waitpid( l_pid, nullptr, 0 );
+}
+
+void serve_client( int t_sock )
+{
+    char l_buf[ 256 ];
+    char l_script[ PY_EXAMPLES * 300 ];
+    int l_count = 0;
+    int l_script_len = 0;
+
+    while ( 1 )
+    {
+        int l_len = read( t_sock, l_buf, sizeof( l_buf ) - 1 );
+        if ( l_len == 0 )
+        {
+            log_msg( LOG_DEBUG, "Client closed socket!" );
+            break;
+        }
+        if ( l_len < 0 )
+        {
+            log_msg( LOG_ERROR, "Unable to read data from client." );
+            break;
+        }
+        log_msg( LOG_DEBUG, "Read %d bytes from client.", l_len );
+        l_buf[ l_len ] = '\0';
+
+        // close request?
+        if ( !strncasecmp( l_buf, STR_CLOSE, strlen( STR_CLOSE ) ) )
+        {
+            log_msg( LOG_INFO, "Client sent 'close' request to close connection." );
+            break;
+        }
+
+        // every line is one example, e.g. "4+5*8" -> print("4+5*8=",4+5*8)
+        char *l_save;
+        for ( char *l_tok = strtok_r( l_buf, "\r\n", &l_save ); l_tok; l_tok = strtok_r( nullptr, "\r\n", &l_save ) )
+        {
+            l_script_len += snprintf( l_script + l_script_len, sizeof( l_script ) - l_script_len,
+                                      "print(\"%s=\",%s)\n", l_tok, l_tok );
+            if ( ++l_count == PY_EXAMPLES )
+            {
+                run_python( t_sock, l_script, l_script_len );
+                l_count = 0;
+                l_script_len = 0;
+            }
+        }
+    }
+
+    close( t_sock );
+}
 
 int main( int t_argc, char **t_argv )
 {
@@ -159,6 +253,9 @@ int main( int t_argc, char **t_argv )
 
     log_msg( LOG_INFO, "Enter 'quit' to quit server." );
 
+    // finished children are reaped automatically
+    signal( SIGCHLD, SIG_IGN );
+
     // go! Two loops inside.
     while ( 1 )
     {
@@ -231,101 +328,24 @@ int main( int t_argc, char **t_argv )
                 log_msg( LOG_INFO, "Client IP: '%s'  port: %d",
                                  inet_ntoa( l_srv_addr.sin_addr ), ntohs( l_srv_addr.sin_port ) );
 
+                fflush( stdout );
+                pid_t l_pid = fork();
+                if ( l_pid < 0 )
+                {
+                    log_msg( LOG_ERROR, "Unable to fork for client." );
+                }
+                else if ( l_pid == 0 )
+                {
+                    close( l_sock_listen );
+                    serve_client( l_sock_client );
+                    exit( EXIT_SUCCESS );
+                }
+                close( l_sock_client );
+
                 break;
             }
 
         } // while wait for client
-
-        // change source from sock_listen to sock_client
-        l_read_poll[ 1 ].fd = l_sock_client;
-
-        while ( 1  )
-        { // communication
-            char l_buf[ 256 ];
-
-            // select from fds
-            int l_poll = poll( l_read_poll, 2, -1 );
-
-            if ( l_poll < 0 )
-            {
-                log_msg( LOG_ERROR, "Function poll failed!" );
-                exit( EXIT_FAILURE );
-            }
-
-            // data on stdin?
-            if ( l_read_poll[ 0 ].revents & POLLIN )
-            {
-                // read data from stdin
-                int l_len = read( STDIN_FILENO, l_buf, sizeof( l_buf ) );
-                if ( l_len == 0 )
-                {
-                    log_msg( LOG_DEBUG, "Stdin closed." );
-                    exit( EXIT_SUCCESS );
-                }
-                if ( l_len < 0 )
-                {
-                    log_msg( LOG_ERROR, "Unable to read data from stdin." );
-                    exit( EXIT_FAILURE );
-                }
-                else
-                    log_msg( LOG_DEBUG, "Read %d bytes from stdin.", l_len );
-
-                // send data to client
-                l_len = write( l_sock_client, l_buf, l_len );
-                if ( l_len < 0 )
-                {
-                    log_msg( LOG_ERROR, "Unable to send data to client." );
-                    exit( EXIT_FAILURE );
-                }
-                else
-                    log_msg( LOG_DEBUG, "Sent %d bytes to client.", l_len );
-            }
-            // data from client?
-            if ( l_read_poll[ 1 ].revents & POLLIN )
-            {
-                // read data from socket
-                int l_len = read( l_sock_client, l_buf, sizeof( l_buf ) );
-                if ( l_len == 0 )
-                {
-                    log_msg( LOG_DEBUG, "Client closed socket!" );
-                    close( l_sock_client );
-                    break;
-                }
-                else if ( l_len < 0 )
-                {
-                    log_msg( LOG_ERROR, "Unable to read data from client." );
-                    close( l_sock_client );
-                    break;
-                }
-                else
-                    log_msg( LOG_DEBUG, "Read %d bytes from client.", l_len );
-
-                // write data to client
-                l_len = write( STDOUT_FILENO, l_buf, l_len );
-                if ( l_len < 0 )
-                {
-                    log_msg( LOG_ERROR, "Unable to write data to stdout." );
-                    exit( EXIT_FAILURE );
-                }
-
-                // close request?
-                if ( !strncasecmp( l_buf, "close", strlen( STR_CLOSE ) ) )
-                {
-                    log_msg( LOG_INFO, "Client sent 'close' request to close connection." );
-                    close( l_sock_client );
-                    log_msg( LOG_INFO, "Connection closed. Waiting for new client." );
-                    break;
-                }
-            }
-            // request for quit
-            if ( !strncasecmp( l_buf, "quit", strlen( STR_QUIT ) ) )
-            {
-                close( l_sock_listen );
-                close( l_sock_client );
-                log_msg( LOG_INFO, "Request to 'quit' entered" );
-                exit( EXIT_SUCCESS );
-                }
-        } // while communication
     } // while ( 1 )
 
     return 0;

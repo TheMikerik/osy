@@ -22,8 +22,10 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <ctime>
 
 #define STR_CLOSE               "close"
+#define POLL_TIMEOUT            5000    // ms, then the client sends a random example
 
 // ***************************************************************************
 // log messages
@@ -177,13 +179,28 @@ int main( int t_argc, char **t_argv )
     l_read_poll[ 1 ].fd = l_sock_server;
     l_read_poll[ 1 ].events = POLLIN;
 
+    srand( time( nullptr ) );
+
     // go!
     while ( 1 )
     {
         char l_buf[ 128 ];
 
-        // select from fds
-        if ( poll( l_read_poll, 2, -1 ) < 0 ) break;
+        int l_poll = poll( l_read_poll, 2, POLL_TIMEOUT );
+        if ( l_poll < 0 ) break;
+
+        if ( l_poll == 0 )
+        {
+            char l_op = rand() % 2 ? '+' : '-';
+            int l_len = snprintf( l_buf, sizeof( l_buf ), "%d%c%d\n", rand() % 10, l_op, rand() % 10 );
+            log_msg( LOG_INFO, "Timeout, sending example." );
+            if ( write( l_sock_server, l_buf, l_len ) < 0 )
+            {
+                log_msg( LOG_ERROR, "Unable to send data to server." );
+                break;
+            }
+            continue;
+        }
 
         // data on stdin?
         if ( l_read_poll[ 0 ].revents & POLLIN )

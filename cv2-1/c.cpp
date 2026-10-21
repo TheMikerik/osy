@@ -19,6 +19,7 @@
 #include <cerrno>
 #include <unistd.h>
 #include <poll.h>
+#include <sys/wait.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -75,7 +76,7 @@ const char g_help[] =
     "\n"
     "  Socket client example.\n"
     "\n"
-    "  Use: %s [-h] [-d] ip_or_name port_number\n"
+    "  Use: %s [-h] [-d] ip_or_name port_number file_name\n"
     "\n"
     "    -d  debug mode \n"
     "    -h  this help\n"
@@ -88,6 +89,7 @@ int main( int t_argc, char **t_argv )
 {
     int l_port = 0;
     char *l_host = nullptr;
+    char *l_file = nullptr;
 
     // parsing arguments
     for ( int inx = 1; inx < t_argc; inx++ )
@@ -113,10 +115,14 @@ int main( int t_argc, char **t_argv )
             {
                 l_port = atoi( t_argv[ inx ] );
             }
+            else if ( l_file == nullptr )
+            {
+                l_file = t_argv[ inx ];
+            }
         }
     }
 
-    if ( l_host == nullptr || l_port <= 0 )
+    if ( l_host == nullptr || l_port <= 0 || l_file == nullptr )
     {
         log_msg( LOG_INFO, "Host or port is missing!" );
         printf( g_help, t_argv[ 0 ] );
@@ -167,93 +173,27 @@ int main( int t_argc, char **t_argv )
     log_msg( LOG_INFO, "Server IP: '%s'  port: %d",
              inet_ntoa( l_cl_addr.sin_addr ), ntohs( l_cl_addr.sin_port ) );
 
-    log_msg( LOG_INFO, "Enter 'close' to close application." );
-
-    // list of fd sources
-    pollfd l_read_poll[ 2 ];
-
-    l_read_poll[ 0 ].fd = STDIN_FILENO;
-    l_read_poll[ 0 ].events = POLLIN;
-    l_read_poll[ 1 ].fd = l_sock_server;
-    l_read_poll[ 1 ].events = POLLIN;
-
-    // go!
-    while ( 1 )
+    // child: stdout of 'gzip -c file' goes to socket
+    pid_t l_pid = fork();
+    if ( l_pid < 0 )
     {
-        char l_buf[ 128 ];
-
-        // select from fds
-        if ( poll( l_read_poll, 2, -1 ) < 0 ) break;
-
-        // data on stdin?
-        if ( l_read_poll[ 0 ].revents & POLLIN )
-        {
-            //  read from stdin
-            int l_len = read( STDIN_FILENO, l_buf, sizeof( l_buf ) );
-            if ( l_len == 0 )
-            {
-                log_msg( LOG_DEBUG, "Stdin closed." );
-                break;
-            }
-            if ( l_len < 0 )
-            {
-                log_msg( LOG_ERROR, "Unable to read from stdin." );
-                break;
-            }
-            else
-            {
-                log_msg( LOG_DEBUG, "Read %d bytes from stdin.", l_len );
-            }
-
-            // send data to server
-            l_len = write( l_sock_server, l_buf, l_len );
-            if ( l_len < 0 )
-            {
-                log_msg( LOG_ERROR, "Unable to send data to server." );
-                break;
-            }
-            else
-            {
-                log_msg( LOG_DEBUG, "Sent %d bytes to server.", l_len );
-            }
-        }
-
-        // data from server?
-        if ( l_read_poll[ 1 ].revents & POLLIN )
-        {
-            // read data from server
-            int l_len = read( l_sock_server, l_buf, sizeof( l_buf ) );
-            if ( l_len == 0 )
-            {
-                log_msg( LOG_DEBUG, "Server closed socket." );
-                break;
-            }
-            else if ( l_len < 0 )
-            {
-                log_msg( LOG_ERROR, "Unable to read data from server." );
-                break;
-            }
-            else
-            {
-                log_msg( LOG_DEBUG, "Read %d bytes from server.", l_len );
-            }
-
-            // display on stdout
-            l_len = write( STDOUT_FILENO, l_buf, l_len );
-            if ( l_len < 0 )
-            {
-                log_msg( LOG_ERROR, "Unable to write to stdout." );
-                break;
-            }
-
-            // request to close?
-            if ( strncasecmp( l_buf, STR_CLOSE, strlen( STR_CLOSE ) ) == 0 )
-            {
-                log_msg( LOG_INFO, "Connection will be closed..." );
-                break;
-            }
-        }
+        log_msg( LOG_ERROR, "Unable to fork." );
+        exit( EXIT_FAILURE );
     }
+
+    if ( l_pid == 0 )
+    {
+        dup2( l_sock_server, STDOUT_FILENO );
+        close( l_sock_server );
+        execlp( "gzip", "gzip", "-c", l_file, nullptr );
+        log_msg( LOG_ERROR, "Unable to run gzip." );
+        exit( EXIT_FAILURE );
+    }
+
+    waitpid( l_pid, nullptr, 0 );
+
+    // no more data, server gets EOF
+    shutdown( l_sock_server, SHUT_WR );
 
     // close socket
     close( l_sock_server );
