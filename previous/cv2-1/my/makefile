@@ -16,6 +16,7 @@ TARGETS = $(SOURCES:%.cpp=%)
 
 CPPFLAGS += -g -pthread -Wall -Werror
 LDFLAGS += -g -pthread
+LDLIBS += -lrt
 
 .PHONY: all clean
 
