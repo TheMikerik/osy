@@ -1,17 +1,3 @@
-// ***************************************************************************
-//
-// Program example for labs in subject Operating Systems
-//
-// Petr Olivka, Dept. of Computer Science, petr.olivka@vsb.cz, 2026
-//
-// Example of socket server.
-//
-// This program is example of socket server and it allows to connect and serve
-// more clients. Every client is served by its own thread.
-// The mandatory argument of program is port number for listening.
-//
-// ***************************************************************************
-
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -76,7 +62,6 @@ void log_msg( int t_log_level, const char *t_form, ... )
 }
 
 // ***************************************************************************
-// clients shared by all threads
 
 struct ClientInfo
 {
@@ -84,9 +69,9 @@ struct ClientInfo
     std::string nick;
 };
 
-std::vector< ClientInfo > g_clients;    // connected clients
-sem_t g_list_sem;                       // protects g_clients
-sem_t g_pause_sem;                      // 0 while some client holds 'lock:'
+std::vector< ClientInfo > g_clients;
+sem_t g_list_sem;                  
+sem_t g_pause_sem;               
 
 // ***************************************************************************
 // help
@@ -104,7 +89,6 @@ const char g_help[] =
 
 // ***************************************************************************
 
-// send text to all connected clients
 void send_to_all( const std::string &t_text )
 {
     sem_wait( &g_list_sem );
@@ -119,16 +103,14 @@ void send_to_all( const std::string &t_text )
 }
 
 // ***************************************************************************
-// thread serving one client
 
 void *client_thread( void *t_par )
 {
     int t_sock = ( intptr_t ) t_par;
     std::string l_nick;
-    bool l_named = false;       // nick already entered
-    bool l_locked = false;      // this client holds 'lock:'
+    bool l_named = false;
+    bool l_locked = false;
 
-    // add socket of this client to the list
     sem_wait( &g_list_sem );
     g_clients.push_back( { t_sock, "" } );
     sem_post( &g_list_sem );
@@ -151,10 +133,9 @@ void *client_thread( void *t_par )
         }
 
         l_buf[ l_len ] = '\0';
-        l_buf[ strcspn( l_buf, "\r\n" ) ] = '\0';   // remove new line
+        l_buf[ strcspn( l_buf, "\r\n" ) ] = '\0';
         std::string l_text = l_buf;
 
-        // first message is nick
         if ( !l_named )
         {
             l_nick = l_text;
@@ -174,7 +155,6 @@ void *client_thread( void *t_par )
             continue;
         }
 
-        // close request?
         if ( !strncasecmp( l_buf, STR_CLOSE, strlen( STR_CLOSE ) ) )
         {
             log_msg( LOG_INFO, "Client '%s' sent 'close' request.", l_nick.c_str() );
@@ -185,7 +165,7 @@ void *client_thread( void *t_par )
         {
             if ( !l_locked )
             {
-                sem_wait( &g_pause_sem );   // wait until nobody else holds the lock
+                sem_wait( &g_pause_sem );
                 l_locked = true;
             }
             continue;
@@ -209,13 +189,12 @@ void *client_thread( void *t_par )
         }
         else
         {
-            sem_wait( &g_pause_sem );       // wait while another client holds 'lock:'
+            sem_wait( &g_pause_sem );
             send_to_all( l_msg );
             sem_post( &g_pause_sem );
         }
     }
 
-    // client is leaving: release lock, remove from list, close socket
     if ( l_locked )
     {
         sem_post( &g_pause_sem );
@@ -276,9 +255,7 @@ int main( int t_argc, char **t_argv )
 
     log_msg( LOG_INFO, "Server will listen on port: %d.", l_port );
 
-    // writing to socket closed by client must not kill the server
     signal( SIGPIPE, SIG_IGN );
-
     sem_init( &g_list_sem, 0, 1 );
     sem_init( &g_pause_sem, 0, 1 );
 
@@ -329,7 +306,6 @@ int main( int t_argc, char **t_argv )
     l_read_poll[ 1 ].fd = l_sock_listen;
     l_read_poll[ 1 ].events = POLLIN;
 
-    // go! Main thread accepts clients and reads keyboard, each client has own thread
     while ( 1 )
     {
         // select from fds
@@ -385,7 +361,6 @@ int main( int t_argc, char **t_argv )
             log_msg( LOG_INFO, "Client IP: '%s'  port: %d",
                              inet_ntoa( l_rsa.sin_addr ), ntohs( l_rsa.sin_port ) );
 
-            // thread owns the socket and closes it when client leaves
             pthread_t l_thread_id;
             int l_err = pthread_create( &l_thread_id, nullptr, client_thread, ( void * ) ( intptr_t ) l_sock_client );
             if ( l_err != 0 )
